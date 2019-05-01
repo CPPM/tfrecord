@@ -42,7 +42,7 @@ def main(_):
 
       # Build model...
       x=tf.placeholder(tf.float32,[None,224,224,3])
-      y=tf.placeholder(tf.int64,[None,1])
+      y=tf.placeholder(tf.int64,[None])
       conv0 = tf.layers.conv2d(
           x, 10, 3, activation=tf.nn.relu)
 
