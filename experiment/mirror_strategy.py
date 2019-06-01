@@ -20,7 +20,7 @@ import tensorflow as tf
 
 #os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
 
 NUM_CLASSES = 1000
 BATCH_SIZE = 256
@@ -28,6 +28,12 @@ EPOCHS = 1
 NUM_GPUS = 2
 
 TRAIN_SIZE = 1281167
+
+
+gpu_device=[]
+for i in range(NUM_GPUS):
+    gpu_device.append(r'/device:GPU:{}'.format(i))
+print("111111111111111111111111111111111111111",gpu_device)
 '''
 local meanstd = {
    mean = { 0.485, 0.456, 0.406 },
@@ -46,7 +52,7 @@ model_dir = '/home/limk/saved_models_0/%s' % (args.timeline,)
 if os.path.exists(model_dir):
     shutil.rmtree(model_dir)
 os.makedirs(model_dir)
-data_dir = '/data/train/tmp/'
+data_dir = '/data/train/tfdata/'
 timeline_dir = '/home/limk/timeline/%s' % (args.timeline,)
 if os.path.exists(timeline_dir):
     shutil.rmtree(timeline_dir)
@@ -57,7 +63,7 @@ os.makedirs(timeline_dir, exist_ok=True)
 def input_fn():
     # import pdb;pdb.set_trace()
     train_files_names = os.listdir(data_dir)
-    train_files = [data_dir + item for item in train_files_names[:10]]
+    train_files = [data_dir + item for item in train_files_names[:1000]]
     dataset_train = tf.data.TFRecordDataset(train_files, buffer_size=2048,
                                             num_parallel_reads=128)
 
@@ -96,7 +102,7 @@ def main():
     tf.logging.set_verbosity(tf.logging.INFO)
     ### classifier
     model = tf.keras.applications.ResNet50(weights=None, classes=1000)
-    model.summary()
+    # model.summary()
     # import pdb;pdb.set_trace()
 
     optimizer = tf.train.AdamOptimizer(learning_rate=0.01)
@@ -108,26 +114,30 @@ def main():
         strategy = tf.contrib.distribute.OneDeviceStrategy('/device:GPU:0')
     else:
         strategy = tf.contrib.distribute.MirroredStrategy(
-            devices=['/device:GPU:0', '/device:GPU:1'])
+            devices=gpu_device)
     # else: strategy = tf.contrib.distribute.MirroredStrategy(num_gpus=NUM_GPUS)
     # else:
     #   strategy = tf.contrib.distribute.ParameterServerStrategy(NUM_GPUS)   # need tensorflow 1.11 version
 
+    # gpu_config = tf.ConfigProto(allow_soft_placement=True,
+    #                             log_device_placement=False)
+
     session_config = tf.ConfigProto(gpu_options=tf.GPUOptions(
-        allow_growth=True))  # , inter_op_parallelism_threads=2, intra_op_parallelism_threads=2)
+        allow_growth=True),allow_soft_placement=True,log_device_placement=False)  # , inter_op_parallelism_threads=2, intra_op_parallelism_threads=2)
     # session_config = None#tf.ConfigProto()
-    # session_config.gpu_options.allow_growth = False
+    # session_config.gpu_options.allow_growth = True
+    session_config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
 
     config = tf.estimator.RunConfig(model_dir=model_dir,
-                                    train_distribute=None,
+                                    train_distribute=strategy,
                                     save_checkpoints_steps=5000,
                                     session_config=session_config)  # distributed mode, fixed batch_size and fixed memory using
     #                                  train_distribute=strategy, session_config = session_config, save_checkpoints_steps=5000)   # single mode, floating batch_size and memory using
     #                                  train_distribute=None,save_checkpoints_steps=5000)                                      # single mode, fixed batch_size and fixed memory using
 
     estimator = tf.keras.estimator.model_to_estimator(model, config=config)
-    timeline = tf.train.ProfilerHook(save_steps=500, output_dir=timeline_dir)
-    estimator.train(input_fn=input_fn, hooks=[time_hist, timeline])
+    timeline = tf.train.ProfilerHook(save_steps=1000, output_dir=timeline_dir)
+    estimator.train(input_fn=input_fn, hooks=[time_hist, timeline],steps=1000)
 
     ####################################
     total_time = sum(time_hist.times)

@@ -18,7 +18,7 @@ def count_gpu_utilization_ratio(df=None,gpu_num=0,ratio=0):
         # print(b.shape)
         print("GPU {}利用率{}%以上时间占比 {}".format(i,ratio,a.shape[0]/b.shape[0]))
 
-count_gpu_utilization_ratio(df,gpu_num=2,ratio=50)
+count_gpu_utilization_ratio(df,gpu_num=4,ratio=50)
 
 
 
@@ -37,7 +37,7 @@ def show_gpu_utilization(df=None,gpu_num=0):
     plt.show()
 
 
-show_gpu_utilization(df,gpu_num=2)
+show_gpu_utilization(df,gpu_num=4)
 
 
 

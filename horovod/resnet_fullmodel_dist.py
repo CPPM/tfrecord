@@ -5,7 +5,7 @@ import logging
 import tensorflow as tf
 import numpy as np
 from tensorflow.contrib.slim import nets
-import horovod.tensorflow as hvd
+# import horovod.tensorflow as hvd
 
 # TODO(limk):将本文件改为分布式，查看读取数据的顺序
 
@@ -38,7 +38,7 @@ LR = 0.01
 slim = tf.contrib.slim
 
 # data_dir = "/data/train/tfdata/"
-data_dir = "/mnt/sdd/data/imagenet/ILSVRC2012_img_train_tfrecord"
+data_dir = "/mnt/sdd/data/imagenet/ILSVRC2012_img_train_tfrecord/"
 
 
 # ps_hosts = FLAGS.ps_hosts.split(",")
@@ -171,8 +171,8 @@ def main(_):
     """
     model
     """
-    import pdb;
-    pdb.set_trace()
+    # import pdb;
+    # pdb.set_trace()
 
     net, endpoints = nets.resnet_v1.resnet_v1_50(x,
                                                  num_classes=NUM_CLASSES,
@@ -193,7 +193,7 @@ def main(_):
 
     global_step = tf.train.get_or_create_global_step()
 
-    opt = tf.train.RMSPropOptimizer(0.001)
+    opt = tf.train.AdamOptimizer(0.001)
     train_op = opt.minimize(mean_loss, global_step=global_step)
 
     # print("global_step", global_step)
@@ -210,8 +210,8 @@ def main(_):
         # Horovod: adjust number of steps based on number of GPUs.
         tf.train.StopAtStepHook(last_step=500 ),
 
-        tf.train.LoggingTensorHook(tensors={'step': global_step, 'loss': mean_loss},
-                                   every_n_iter=10),
+        # tf.train.LoggingTensorHook(tensors={'step': global_step, 'loss': mean_loss},
+        #                            every_n_iter=10),
     ]
 
     # Horovod: pin GPU to be used to process local rank (one GPU per process)
@@ -228,53 +228,52 @@ def main(_):
     with tf.train.MonitoredTrainingSession(checkpoint_dir=checkpoint_dir,
                                            hooks=hooks,
                                            config=config) as mon_sess:
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         mon_sess.run(init_op)
 
         local_step = 0
+
+
+
+
+        total_start_time = time.time()
         while not mon_sess.should_stop():
-            # Run a training step synchronously.
+            # print("labels: {}".format(mon_sess.run(y_iter)))
+            start_time = time.time()
+            try:
+                image_and_label = mon_sess.run(img_and_label_iter)
+                _, loss_, step = mon_sess.run(
+                    [train_op, mean_loss, global_step],
+                    feed_dict={x: image_and_label[0],
+                               y: image_and_label[1]})
+            except tf.errors.OutOfRangeError:
+                break
 
+            # _, loss_, step = mon_sess.run(
+            #     [train_op, mean_loss, global_step],
+            #     feed_dict={x: mon_sess.run(img_iter),
+            #                y:
+            #                    mon_sess.run(label_iter)})
 
+            local_step += 1
+            step_time = time.time() - start_time
+            if step % 10 == 0:
+                images_per_second_in_a_step = BATCH_SIZE / step_time
+                print("local_step: {:<10d}".format(local_step),
+                      "global_step: {:<10d}".format(step),
+                      "loss_: {:.6f}".format(loss_),
+                      " {:.6f} images/s in a step".format(
+                          images_per_second_in_a_step))
+                # logging.info(
+                #     'local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(
+                #         local_step, step, loss_,
+                #         images_per_second_in_a_step))
+        total_time = time.time() - total_start_time
 
-            total_start_time = time.time()
-            while not mon_sess.should_stop():
-                # print("labels: {}".format(mon_sess.run(y_iter)))
-                start_time = time.time()
-                try:
-                    image_and_label = mon_sess.run(img_and_label_iter)
-                    _, loss_, step = mon_sess.run(
-                        [train_op, mean_loss, global_step],
-                        feed_dict={x: image_and_label[0],
-                                   y: image_and_label[1]})
-                except tf.errors.OutOfRangeError:
-                    break
+        images_per_second = local_step * BATCH_SIZE / total_time
 
-                # _, loss_, step = mon_sess.run(
-                #     [train_op, mean_loss, global_step],
-                #     feed_dict={x: mon_sess.run(img_iter),
-                #                y:
-                #                    mon_sess.run(label_iter)})
-
-                local_step += 1
-                step_time = time.time() - start_time
-                if step % 10 == 0:
-                    images_per_second_in_a_step = BATCH_SIZE / step_time
-                    print("local_step: {:<10d}".format(local_step),
-                          "global_step: {:<10d}".format(step),
-                          "loss_: {:.6f}".format(loss_),
-                          " {:.6f} images/s in a step".format(
-                              images_per_second_in_a_step))
-                    # logging.info(
-                    #     'local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(
-                    #         local_step, step, loss_,
-                    #         images_per_second_in_a_step))
-            total_time = time.time() - total_start_time
-
-            images_per_second = local_step * BATCH_SIZE / total_time
-
-            print("total time: {} s, {:.6f} images/s in a step".format(
-                total_time, images_per_second))
+        print("total time: {} s, {:.6f} images/s in a step".format(
+            total_time, images_per_second))
             # logging.info('total_time:{},  images/s:{}'.format(total_time,
             #                                                   images_per_second))
     #

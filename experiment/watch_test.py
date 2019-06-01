@@ -8,6 +8,10 @@ file_name = os.path.join(os.path.dirname(os.path.realpath(__file__)),
 logging.basicConfig(filename=file_name, level=logging.INFO)
 
 
+## 收集 cpu 内存 gpu的利用率
+
+
+
 def watch_cpu():
     pid_str = os.popen('ps -aux|grep /home/limk/tfrecord/experiment/resnet_fullmodel_dist.py').read()
     pids = re.findall(r'(root.*?)python\s/home/limk/tfrecord/experiment/resnet_fullmodel_dist.py',

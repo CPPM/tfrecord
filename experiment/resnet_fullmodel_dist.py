@@ -3,6 +3,7 @@ import time
 import logging
 
 import tensorflow as tf
+import numpy as np
 from tensorflow.contrib.slim import nets
 
 # TODO(limk):将本文件改为分布式，查看读取数据的顺序
@@ -36,9 +37,24 @@ slim = tf.contrib.slim
 data_dir = "/data/train/tfdata/"
 
 
-def input_fn():
+ps_hosts = FLAGS.ps_hosts.split(",")
+worker_hosts = FLAGS.worker_hosts.split(",")
+
+num_ps = len(ps_hosts)
+num_workers = len(worker_hosts)
+
+LR_scale=LR*num_workers
+
+AUTOTUNE=tf.data.experimental.AUTOTUNE
+
+
+def input_fn(num_workers=1,index=0):
+    # every_worker_dataset_num=int(NUM_CLASSES/num_workers)
+    # dataset_begin_index=index*every_worker_dataset_num
+    # dataset_end_index=(index+1)*every_worker_dataset_num
     # import pdb;pdb.set_trace()
     train_files_names = os.listdir(data_dir)
+    # train_files = [data_dir + item for item in train_files_names[dataset_begin_index:dataset_end_index]]
     train_files = [data_dir + item for item in train_files_names[:1000]]
     dataset_train = tf.data.TFRecordDataset(train_files, buffer_size=2048,
                                             num_parallel_reads=128)
@@ -56,17 +72,35 @@ def input_fn():
         return image, label
 
     dataset_train = dataset_train.repeat(EPOCHS)
-    dataset_train = dataset_train.shuffle(buffer_size=1024)
-    dataset_train = dataset_train.map(_parse_data, num_parallel_calls=30)
-    dataset_train = dataset_train.batch(BATCH_SIZE)
-    dataset_train = dataset_train.prefetch(2)
+    dataset_train = dataset_train.shuffle(buffer_size=1024,seed=1)
+    dataset_train = dataset_train.map(_parse_data, num_parallel_calls=AUTOTUNE)
+    dataset_train = dataset_train.batch(BATCH_SIZE,drop_remainder=True)
+    dataset_train = dataset_train.prefetch(4)
     return dataset_train
 
 
-dataset_train = input_fn()
+def input_fn_test():
+    data_image = np.random.random([512, 224, 224, 3])
+    data_label = np.random.randint(0, 1000, [512])
+    # 生成one_hot编码
+    data_label = np.eye(1000)[data_label]
+    print(data_image.shape, data_label.shape)
 
-img_iter, label_iter = dataset_train.make_one_shot_iterator().get_next()
-print(img_iter.shape, label_iter.shape)
+    dataset = tf.data.Dataset.from_tensor_slices((data_image, data_label))
+
+    dataset = dataset.repeat(EPOCHS)
+    dataset = dataset.shuffle(buffer_size=4)
+    # dataset = dataset.map(_parse_data, num_parallel_calls=30)
+    dataset = dataset.batch(BATCH_SIZE, drop_remainder=True)
+    dataset = dataset.prefetch(4)
+    return dataset
+
+
+dataset_train = input_fn(num_workers=num_workers,index=FLAGS.task_index)
+# dataset_train = input_fn_test()
+
+img_and_label_iter = dataset_train.make_one_shot_iterator().get_next()
+#print(img_iter.shape, label_iter.shape)
 
 
 # with tf.Session() as sess:
@@ -94,6 +128,7 @@ def main(_):
     gpu_config = tf.ConfigProto(allow_soft_placement=True,
                                 log_device_placement=False)
     gpu_config.gpu_options.allow_growth = True
+    # gpu_config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
 
     server = tf.train.Server(
         cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index,
@@ -116,7 +151,13 @@ def main(_):
         is_chief = (FLAGS.task_index == 0)
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % FLAGS.task_index,
-                cluster=cluster)):
+                cluster=cluster,
+                ),):
+                # ps_strategy=tf.contrib.training.RandomStrategy(num_ps)),):
+                # ps_strategy=tf.contrib.training.GreedyLoadBalancingStrategy(num_ps, tf.contrib.training.byte_size_load_fn)),):
+            # jit_scope = tf.contrib.compiler.jit.experimental_jit_scope
+            # with jit_scope():
+
             x = tf.placeholder(tf.float32, [None, 224, 224, 3])
             y = tf.placeholder(tf.int64, [None, 1000])
 
@@ -124,10 +165,12 @@ def main(_):
             model
             """
             net, endpoints = nets.resnet_v1.resnet_v1_50(x,
-                                                         num_classes=None,
+                                                         num_classes=NUM_CLASSES,
                                                          is_training=None)
+            print("1111111111111111111",net.shape)
             net = tf.squeeze(net, axis=[1, 2])
-            net = slim.dropout(net, keep_prob=0.5, scope='scope')
+            print("1111111111111111111",net.shape)
+            # net = slim.dropout(net, keep_prob=0.5, scope='scope')
             logits = slim.fully_connected(net, num_outputs=NUM_CLASSES,
                                           activation_fn=None, scope='fc')
 
@@ -171,7 +214,7 @@ def main(_):
             # pdb.set_trace()
 
             optsync = tf.train.SyncReplicasOptimizer(
-                tf.train.AdamOptimizer(learning_rate=1e-2),
+                tf.train.AdamOptimizer(learning_rate=LR),
                 replicas_to_aggregate=num_workers,
                 total_num_replicas=num_workers,
                 use_locking=True
@@ -187,11 +230,11 @@ def main(_):
             with tf.train.MonitoredTrainingSession(master=server.target,
                                                    is_chief=(
                                                            FLAGS.task_index == 0),
-                                                   # checkpoint_dir=FLAGS.log_dir,
+                                                   checkpoint_dir='/home/limk/tfrecord/experiment/log/',
                                                    # save_checkpoint_secs=60
                                                    hooks=hooks,
                                                    config=gpu_config,
-                                                   stop_grace_period_secs=30
+                                                   stop_grace_period_secs=60
                                                    ) as mon_sess:
                 # 用于保存和载入模型
                 # log_dir = FLAGS.log_dir
@@ -216,12 +259,21 @@ def main(_):
                 while not mon_sess.should_stop():
                     # print("labels: {}".format(mon_sess.run(y_iter)))
                     start_time = time.time()
+                    try:
+                        image_and_label=mon_sess.run(img_and_label_iter)
+                        _, loss_, step = mon_sess.run(
+                            [train_op, mean_loss, global_step],
+                            feed_dict={x: image_and_label[0],
+                                       y:image_and_label[1]})
+                    except tf.errors.OutOfRangeError:
+                        break
 
-                    _, loss_, step = mon_sess.run(
-                        [train_op, mean_loss, global_step],
-                        feed_dict={x: mon_sess.run(img_iter),
-                                   y:
-                                       mon_sess.run(label_iter)})
+
+                    # _, loss_, step = mon_sess.run(
+                    #     [train_op, mean_loss, global_step],
+                    #     feed_dict={x: mon_sess.run(img_iter),
+                    #                y:
+                    #                    mon_sess.run(label_iter)})
 
                     local_step += 1
                     step_time = time.time() - start_time
@@ -232,11 +284,10 @@ def main(_):
                               "loss_: {:.6f}".format(loss_),
                               " {:.6f} images/s in a step".format(
                                   images_per_second_in_a_step))
-                        logging.info('local_step:{},  step:{}, loss:{}, cpu_index:{}'.format(local_step, step, loss_,images_per_second_in_a_step))
-
+                        logging.info('local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(local_step, step, loss_,images_per_second_in_a_step))
                 total_time = time.time() - total_start_time
 
-                images_per_second=FLAGS.train_steps * BATCH_SIZE / total_time
+                images_per_second=local_step * BATCH_SIZE / total_time
 
                 print("total time: {} s, {:.6f} images/s in a step".format(
                     total_time, images_per_second))

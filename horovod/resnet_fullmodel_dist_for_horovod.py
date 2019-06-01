@@ -10,6 +10,8 @@ import horovod.tensorflow as hvd
 # TODO(limk):将本文件改为分布式，查看读取数据的顺序
 
 print(tf.__version__)
+os.system('rm -rf /home/limk/horovod/checkpoints/*')
+print("delete previous checkpoint")
 
 # # Flags for defining the tf.train.ClusterSpec
 # tf.app.flags.DEFINE_string("ps_hosts", "172.172.0.2:2232",
@@ -27,6 +29,8 @@ print(tf.__version__)
 #     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # if FLAGS.job_name == 'worker':
 #     os.environ["CUDA_VISIBLE_DEVICES"] = str(FLAGS.task_index)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+
 
 EPOCHS = 1
 BATCH_SIZE = 256
@@ -36,6 +40,7 @@ LR = 0.01
 slim = tf.contrib.slim
 
 data_dir = "/data/train/tfdata/"
+# data_dir = "/mnt/sdd/data/imagenet/ILSVRC2012_img_train_tfrecord/"
 
 
 # ps_hosts = FLAGS.ps_hosts.split(",")
@@ -46,7 +51,7 @@ data_dir = "/data/train/tfdata/"
 
 # LR_scale=LR*num_workers
 
-AUTOTUNE=tf.data.experimental.AUTOTUNE
+# AUTOTUNE=tf.data.experimental.AUTOTUNE
 
 
 def input_fn(num_workers=1,index=0):
@@ -56,7 +61,7 @@ def input_fn(num_workers=1,index=0):
     # import pdb;pdb.set_trace()
     train_files_names = os.listdir(data_dir)
     # train_files = [data_dir + item for item in train_files_names[dataset_begin_index:dataset_end_index]]
-    train_files = [data_dir + item for item in train_files_names[:1000]]
+    train_files = [data_dir + item for item in train_files_names[:100]]
     dataset_train = tf.data.TFRecordDataset(train_files, buffer_size=2048,
                                             num_parallel_reads=128)
 
@@ -74,7 +79,7 @@ def input_fn(num_workers=1,index=0):
 
     dataset_train = dataset_train.repeat(EPOCHS)
     dataset_train = dataset_train.shuffle(buffer_size=1024,seed=1)
-    dataset_train = dataset_train.map(_parse_data, num_parallel_calls=AUTOTUNE)
+    dataset_train = dataset_train.map(_parse_data, num_parallel_calls=30)
     dataset_train = dataset_train.batch(BATCH_SIZE,drop_remainder=True)
     dataset_train = dataset_train.prefetch(4)
     return dataset_train
@@ -155,8 +160,15 @@ def main(_):
         #         ),):
                 # ps_strategy=tf.contrib.training.RandomStrategy(num_ps)),):
                 # ps_strategy=tf.contrib.training.GreedyLoadBalancingStrategy(num_ps, tf.contrib.training.byte_size_load_fn)),):
-    x = tf.placeholder(tf.float32, [None, 224, 224, 3])
-    y = tf.placeholder(tf.int64, [None, 1000])
+
+    config = tf.ConfigProto(allow_soft_placement=True,
+                            log_device_placement=False)
+    config.gpu_options.allow_growth = True
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
+
+    with tf.name_scope('input'):
+        x = tf.placeholder(tf.float32, [None, 224, 224, 3],name='x')
+        y = tf.placeholder(tf.int64, [None, 1000],name='y')
 
     """
     model
@@ -181,6 +193,7 @@ def main(_):
     global_step = tf.train.get_or_create_global_step()
 
     opt = tf.train.RMSPropOptimizer(0.001 * hvd.size())
+    opt = hvd.DistributedOptimizer(opt)
     train_op = opt.minimize(mean_loss, global_step=global_step)
 
     # print("global_step", global_step)
@@ -192,7 +205,7 @@ def main(_):
         # from rank 0 to all other processes. This is necessary to ensure consistent
         # initialization of all workers when training is started with random weights
         # or restored from a checkpoint.
-        hvd.BroadcastGlobalVariablesHook(0),
+        # hvd.BroadcastGlobalVariablesHook(0),
 
         # Horovod: adjust number of steps based on number of GPUs.
         tf.train.StopAtStepHook(last_step=500 // hvd.size()),
@@ -202,44 +215,175 @@ def main(_):
     ]
 
     # Horovod: pin GPU to be used to process local rank (one GPU per process)
-    config = tf.ConfigProto(allow_soft_placement=True,
-                                log_device_placement=False)
-    config.gpu_options.allow_growth = True
-    config.gpu_options.visible_device_list = str(hvd.local_rank())
 
-    checkpoint_dir = '/home/limk/horovod/checkpoints' if hvd.rank() == 0 else None
+
+    checkpoint_dir = '/home/limk/horovod/checkpoints/' if hvd.rank() == 0 else None
+
+    init_op = tf.global_variables_initializer()
 
     # The MonitoredTrainingSession takes care of session initialization,
     # restoring from a checkpoint, saving to a checkpoint, and closing when done
     # or an error occurs.
-    with tf.train.MonitoredTrainingSession(checkpoint_dir=checkpoint_dir,
-                                           hooks=hooks,
-                                           config=config) as mon_sess:
+    # with tf.train.MonitoredTrainingSession(checkpoint_dir=checkpoint_dir,
+    #                                        hooks=hooks,
+    #                                        config=config) as mon_sess:
+    #     # mon_sess.run(init_op)
+    #     # import pdb;pdb.set_trace()
+    #     mon_sess.run(init_op)
+    #     hvd.broadcast_global_variables(0).run()
+    #
+    #     local_step = 0
+    #
+    #     total_start_time = time.time()
+    #     while not mon_sess.should_stop():
+    #         # print("labels: {}".format(mon_sess.run(y_iter)))
+    #         start_time = time.time()
+    #         try:
+    #             image_and_label = mon_sess.run(img_and_label_iter)
+    #
+    #             print(image_and_label)
+    #             import pdb;pdb.set_trace()
+    #
+    #             _, loss_, step = mon_sess.run(
+    #                 [train_op, mean_loss, global_step],
+    #                 feed_dict={x: image_and_label[0],
+    #                            y: image_and_label[1]})
+    #         except tf.errors.OutOfRangeError:
+    #             break
+    #
+    #         # _, loss_, step = mon_sess.run(
+    #         #     [train_op, mean_loss, global_step],
+    #         #     feed_dict={x: mon_sess.run(img_iter),
+    #         #                y:
+    #         #                    mon_sess.run(label_iter)})
+    #
+    #         local_step += 1
+    #         step_time = time.time() - start_time
+    #         if step % 10 == 0:
+    #             images_per_second_in_a_step = BATCH_SIZE / step_time
+    #             print("local_step: {:<10d}".format(local_step),
+    #                   "global_step: {:<10d}".format(step),
+    #                   "loss_: {:.6f}".format(loss_),
+    #                   " {:.6f} images/s in a step".format(
+    #                       images_per_second_in_a_step))
+    #             # logging.info(
+    #             #     'local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(
+    #             #         local_step, step, loss_,
+    #             #         images_per_second_in_a_step))
+    #     total_time = time.time() - total_start_time
+    #
+    #     images_per_second = local_step * BATCH_SIZE / total_time
+    #
+    #     print("total time: {} s, {:.6f} images/s in a step".format(
+    #         total_time, images_per_second))
+
+            # logging.info('total_time:{},  images/s:{}'.format(total_time,
+            #                                                   images_per_second))
+    #
+    # optsync = tf.train.SyncReplicasOptimizer(
+    #     tf.train.AdamOptimizer(learning_rate=LR),
+    #     replicas_to_aggregate=num_workers,
+    #     total_num_replicas=num_workers,
+    #     use_locking=True
+    # )
+    #
+    # sync_replicas_hook = optsync.make_session_run_hook(is_chief)
+    # hooks = [sync_replicas_hook, tf.train.StopAtStepHook(
+    #     last_step=FLAGS.train_steps)]
+    # train_op = optsync.minimize(mean_loss, global_step=global_step)
+    #
+    # init_op = tf.global_variables_initializer()
+    #
+    # with tf.train.MonitoredTrainingSession(master=server.target,
+    #                                        is_chief=(
+    #                                                FLAGS.task_index == 0),
+    #                                        checkpoint_dir='/home/limk/tfrecord/experiment/log/',
+    #                                        # save_checkpoint_secs=60
+    #                                        hooks=hooks,
+    #                                        config=gpu_config,
+    #                                        stop_grace_period_secs=60
+    #                                        ) as mon_sess:
+    #     # 用于保存和载入模型
+    #     # log_dir = FLAGS.log_dir
+    #     mon_sess.run(init_op)
+    #     if is_chief:
+    #         print(
+    #             'Worker %d: Initailizing session...' % FLAGS.task_index)
+    #     else:
+    #         print(
+    #             'Worker %d: Waiting for session to be initaialized...' %
+    #             FLAGS.task_index)
+    #     print(
+    #         'Worker %d: Session initialization complete.' % FLAGS.task_index)
+    #
+    #     local_step = 0
+    #
+    #     print("sleep...............")
+    #     time.sleep(60)
+    #     # import pdb;
+    #     # pdb.set_trace()
+    #     total_start_time = time.time()
+    #     while not mon_sess.should_stop():
+    #         # print("labels: {}".format(mon_sess.run(y_iter)))
+    #         start_time = time.time()
+    #         try:
+    #             image_and_label=mon_sess.run(img_and_label_iter)
+    #             _, loss_, step = mon_sess.run(
+    #                 [train_op, mean_loss, global_step],
+    #                 feed_dict={x: image_and_label[0],
+    #                            y:image_and_label[1]})
+    #         except tf.errors.OutOfRangeError:
+    #             break
+    #
+    #
+    #         # _, loss_, step = mon_sess.run(
+    #         #     [train_op, mean_loss, global_step],
+    #         #     feed_dict={x: mon_sess.run(img_iter),
+    #         #                y:
+    #         #                    mon_sess.run(label_iter)})
+    #
+    #         local_step += 1
+    #         step_time = time.time() - start_time
+    #         if step % 10 == 0:
+    #             images_per_second_in_a_step=BATCH_SIZE / step_time
+    #             print("local_step: {:<10d}".format(local_step),
+    #                   "global_step: {:<10d}".format(step),
+    #                   "loss_: {:.6f}".format(loss_),
+    #                   " {:.6f} images/s in a step".format(
+    #                       images_per_second_in_a_step))
+    #             logging.info('local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(local_step, step, loss_,images_per_second_in_a_step))
+    #     total_time = time.time() - total_start_time
+    #
+    #     images_per_second=local_step * BATCH_SIZE / total_time
+    #
+    #     print("total time: {} s, {:.6f} images/s in a step".format(
+    #         total_time, images_per_second))
+    #     logging.info('total_time:{},  images/s:{}'.format(total_time, images_per_second))
+    with tf.Session(config=config) as mon_sess:
+        # mon_sess.run(init_op)
+        # import pdb;pdb.set_trace()
+        mon_sess.run(init_op)
+        hvd.broadcast_global_variables(0).run()
+
         local_step = 0
-        while not mon_sess.should_stop():
-            # Run a training step synchronously.
-            image_, label_ = next(training_batch_generator)
-            mon_sess.run(train_op, feed_dict={image: image_, label: label_})
 
-            total_start_time = time.time()
-            while not mon_sess.should_stop():
-                # print("labels: {}".format(mon_sess.run(y_iter)))
+        total_start_time = time.time()
+
+        # print("labels: {}".format(mon_sess.run(y_iter)))
+
+        while True:
+            try:
                 start_time = time.time()
-                try:
-                    image_and_label = mon_sess.run(img_and_label_iter)
-                    _, loss_, step = mon_sess.run(
-                        [train_op, mean_loss, global_step],
-                        feed_dict={x: image_and_label[0],
-                                   y: image_and_label[1]})
-                except tf.errors.OutOfRangeError:
-                    break
+                image_and_label = mon_sess.run(img_and_label_iter)
 
-                # _, loss_, step = mon_sess.run(
-                #     [train_op, mean_loss, global_step],
-                #     feed_dict={x: mon_sess.run(img_iter),
-                #                y:
-                #                    mon_sess.run(label_iter)})
+                # print(image_and_label[1])
+                # import pdb;pdb.set_trace()
 
+                _, loss_, step = mon_sess.run(
+                    [train_op, mean_loss, global_step],
+                    feed_dict={x: image_and_label[0],
+                               y: image_and_label[1]})
+                # print(step)
                 local_step += 1
                 step_time = time.time() - start_time
                 if step % 10 == 0:
@@ -249,98 +393,29 @@ def main(_):
                           "loss_: {:.6f}".format(loss_),
                           " {:.6f} images/s in a step".format(
                               images_per_second_in_a_step))
-                    logging.info(
-                        'local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(
-                            local_step, step, loss_,
-                            images_per_second_in_a_step))
-            total_time = time.time() - total_start_time
-
-            images_per_second = local_step * BATCH_SIZE / total_time
-
-            print("total time: {} s, {:.6f} images/s in a step".format(
-                total_time, images_per_second))
-            logging.info('total_time:{},  images/s:{}'.format(total_time,
-                                                              images_per_second))
-
-    optsync = tf.train.SyncReplicasOptimizer(
-        tf.train.AdamOptimizer(learning_rate=LR),
-        replicas_to_aggregate=num_workers,
-        total_num_replicas=num_workers,
-        use_locking=True
-    )
-
-    sync_replicas_hook = optsync.make_session_run_hook(is_chief)
-    hooks = [sync_replicas_hook, tf.train.StopAtStepHook(
-        last_step=FLAGS.train_steps)]
-    train_op = optsync.minimize(mean_loss, global_step=global_step)
-
-    init_op = tf.global_variables_initializer()
-
-    with tf.train.MonitoredTrainingSession(master=server.target,
-                                           is_chief=(
-                                                   FLAGS.task_index == 0),
-                                           checkpoint_dir='/home/limk/tfrecord/experiment/log/',
-                                           # save_checkpoint_secs=60
-                                           hooks=hooks,
-                                           config=gpu_config,
-                                           stop_grace_period_secs=60
-                                           ) as mon_sess:
-        # 用于保存和载入模型
-        # log_dir = FLAGS.log_dir
-        mon_sess.run(init_op)
-        if is_chief:
-            print(
-                'Worker %d: Initailizing session...' % FLAGS.task_index)
-        else:
-            print(
-                'Worker %d: Waiting for session to be initaialized...' %
-                FLAGS.task_index)
-        print(
-            'Worker %d: Session initialization complete.' % FLAGS.task_index)
-
-        local_step = 0
-
-        print("sleep...............")
-        time.sleep(60)
-        # import pdb;
-        # pdb.set_trace()
-        total_start_time = time.time()
-        while not mon_sess.should_stop():
-            # print("labels: {}".format(mon_sess.run(y_iter)))
-            start_time = time.time()
-            try:
-                image_and_label=mon_sess.run(img_and_label_iter)
-                _, loss_, step = mon_sess.run(
-                    [train_op, mean_loss, global_step],
-                    feed_dict={x: image_and_label[0],
-                               y:image_and_label[1]})
             except tf.errors.OutOfRangeError:
+                print("jdjfjdjdj")
                 break
-
-
-            # _, loss_, step = mon_sess.run(
-            #     [train_op, mean_loss, global_step],
-            #     feed_dict={x: mon_sess.run(img_iter),
-            #                y:
-            #                    mon_sess.run(label_iter)})
-
-            local_step += 1
-            step_time = time.time() - start_time
-            if step % 10 == 0:
-                images_per_second_in_a_step=BATCH_SIZE / step_time
-                print("local_step: {:<10d}".format(local_step),
-                      "global_step: {:<10d}".format(step),
-                      "loss_: {:.6f}".format(loss_),
-                      " {:.6f} images/s in a step".format(
-                          images_per_second_in_a_step))
-                logging.info('local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(local_step, step, loss_,images_per_second_in_a_step))
         total_time = time.time() - total_start_time
 
-        images_per_second=local_step * BATCH_SIZE / total_time
+        images_per_second = local_step * BATCH_SIZE / total_time
 
         print("total time: {} s, {:.6f} images/s in a step".format(
             total_time, images_per_second))
-        logging.info('total_time:{},  images/s:{}'.format(total_time, images_per_second))
+
+        # _, loss_, step = mon_sess.run(
+        #     [train_op, mean_loss, global_step],
+        #     feed_dict={x: mon_sess.run(img_iter),
+        #                y:
+        #                    mon_sess.run(label_iter)})
+
+    #
+    #
+    #         # logging.info(
+    #         #     'local_step: {:<10d}  step: {:<10d} loss: {:.6f} images_per_second_in_a_step: {:.6f}'.format(
+    #         #         local_step, step, loss_,
+    #         #         images_per_second_in_a_step))
+
 
 
 if __name__ == "__main__":

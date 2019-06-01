@@ -50,7 +50,7 @@ if args.type == 'worker':
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.index)
 
 NUM_CLASSES = 1000
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 EPOCHS = 1
 NUM_GPUS = 1
 
