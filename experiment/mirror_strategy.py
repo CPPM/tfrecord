@@ -23,7 +23,7 @@ import tensorflow as tf
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 NUM_CLASSES = 1000
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 EPOCHS = 1
 NUM_GPUS = 2
 
@@ -57,7 +57,7 @@ os.makedirs(timeline_dir, exist_ok=True)
 def input_fn():
     # import pdb;pdb.set_trace()
     train_files_names = os.listdir(data_dir)
-    train_files = [data_dir + item for item in train_files_names[:1000]]
+    train_files = [data_dir + item for item in train_files_names[:10]]
     dataset_train = tf.data.TFRecordDataset(train_files, buffer_size=2048,
                                             num_parallel_reads=128)
 
